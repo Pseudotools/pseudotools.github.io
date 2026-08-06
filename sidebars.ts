@@ -80,6 +80,7 @@ const sidebars: SidebarsConfig = {
         'pseudocomfy/topics/library-specification',
         'pseudocomfy/topics/workflow-specification',
         'pseudocomfy/topics/workflow-wizard',
+        'pseudocomfy/topics/workflow-review',
       ],
     },
     {
