@@ -27,7 +27,7 @@ Here's what a finished **Pseudorandom workflow** file looks like — the format 
 You don't need to hand-write any of this. The wizard — labeled **Workflow Converter** in the app, at the `/package-workflow` route — builds it for you from a workflow you've already built in ComfyUI: you upload an export, confirm what it detected, and download a `.pseudorandom.json` file.
 
 :::note Model provenance moved off Supabase
-As of this revision, model provenance no longer lives in a Supabase table. Every vetted model is now its own [Hugging Face](https://huggingface.co/) repo card under the `pseudotools` org, and everything below — model lookups, `endpoint_requirements`, review status — reflects that. See §4 for the current shape, including a note on a couple of rough edges that haven't fully settled yet.
+As of this revision, model provenance no longer lives in a Supabase table. Every vetted model is now its own [Hugging Face](https://huggingface.co/) repo card under the `pseudotools` org, and everything below — model lookups, `endpoint_requirements`, and how a review badge gets computed — reflects that. See §4 for the current shape, including a note on a couple of rough edges that haven't fully settled yet.
 :::
 
 ---
@@ -37,7 +37,7 @@ As of this revision, model provenance no longer lives in a Supabase table. Every
 The wizard is a six-step form:
 
 1. **Upload** — drop in your ComfyUI workflow JSON (see §2 for the required export type). The wizard parses it immediately and reports how many nodes it found, plus counts of database models, possible model files, unrecognized loaders, variables, and seed nodes.
-2. **Database Models** — every model picked via a *vetted* loader node in ComfyUI. The wizard looks each one up (by pointer, falling back to filename — see §3.1) and shows its category, review status, license, and attribution. Anything it can't match is flagged for you to fill in by hand on the next step.
+2. **Database Models** — every model picked via a *vetted* loader node in ComfyUI. The wizard looks each one up (by pointer, falling back to filename — see §3.1) and shows its category, review badge, license, and attribution. Anything it can't match is flagged for you to fill in by hand on the next step.
 3. **Possible Models** — every other filename-shaped string the wizard found in the graph (e.g. `.safetensors`, `.ckpt`, `.pt` files on ordinary loader nodes), plus any loader node that looks like it loads a model but exposes no filename at all (this happens with preset-based loaders like the IPAdapter unified loader — the wizard can see the node but not which file it resolves to at runtime). Confirm which ones are real requirements, set their category, and fill in provenance by hand. You can also add a model manually here if the scan missed something entirely.
 4. **Variables** — one row per `PseudoVar*` node found in the graph (see §5). Name each one (this also generates its `binds_to` token), write a short description, and confirm the default/min/max/step. Seed nodes are listed separately here too, but they aren't configurable — the plugin drives the seed automatically.
 5. **Metadata** — workflow name, description, optional thumbnail, attribution (author/author URL/license), and the global/regional/spatial guidance capability checkboxes. Capabilities are pre-checked based on how the graph is wired (see §3) — you're confirming, not starting from scratch.
@@ -102,9 +102,9 @@ For every vetted-loader node found, the wizard resolves it against a live web AP
 
 - **Primary lookup, by pointer** — `GET /api/models/hf/{record_id}`. `record_id` is a Hugging Face repo path under the `pseudotools` org (e.g. `pseudotools/checkpoint-juggernaut-x-hyper`). Because that path contains a literal `/`, each segment is percent-encoded separately when the request URL is built — encoding the whole ID as one segment would break the route.
 - **Fallback, by filename** — `GET /api/models/hf/by-filename/{filename}`, used when there's no pointer yet (e.g. re-processing a graph where the loader only has a filename set). This one is more expensive: Hugging Face's listing API doesn't expose filenames, so the backend fetches and parses candidate repo cards one at a time until it finds a match. Fine at today's scale (a handful of repos); worth revisiting if the catalog grows.
-- **Model-picker/dropdown listing** — `GET /api/models?category={category}`, where `category` is the Hugging Face repo's own tag-derived spelling, not necessarily the ComfyUI folder name a vetted loader writes into its output `endpoint_requirements.category` (see §5's table). Today only four of the six vetted-loader categories have a matching Hugging Face category at all: `checkpoint`, `controlnet`, `clip_vision`, and `loras` — note `checkpoint` (singular) vs. the ComfyUI folder `checkpoints` (plural) is the one place the two spellings actually diverge; the rest happen to coincide. **`clip` and `vae` have no Hugging Face category mapping yet at all** — models in those two categories can still be resolved directly by `record_id` or filename, but will never appear in a category-filtered listing.
+- **Model-picker/dropdown listing** — `GET /api/models?category={category}`, where `category` is derived from each repo's Hugging Face tag, mapped to the same ComfyUI folder spelling the vetted loaders themselves use (`checkpoints`, `controlnet`, `clip_vision`, `loras`) — these four now agree exactly. **`clip` and `vae` still have no Hugging Face category mapping at all** — models in those two categories can be resolved directly by `record_id` or filename, but will never appear in a category-filtered listing.
 
-Every one of these calls live-fetches Hugging Face on the server side, with no caching layer. A 404/not-found from the detail lookup is a normal, expected state — a model that hasn't been catalogued yet — not an error condition.
+Every one of these calls live-fetches Hugging Face on the server side — see [§4.3, Caching](#43--caching) for how that's made fast without a hand-rolled cache. A 404/not-found from the detail lookup is a normal, expected state — a model that hasn't been catalogued yet — not an error condition.
 
 ### 3.3 • Capability auto-detection
 
@@ -180,24 +180,43 @@ The `category` written here is always the ComfyUI model-subfolder spelling (`che
 
 `provenance_id` and `vetting_status` — from an earlier revision of this schema — are both gone. `provenance_id` (a Supabase UUID) is replaced by `record_id` (a Hugging Face repo path) above. `vetting_status`'s old three-value enum (`vetted | community | unknown`) is replaced entirely by the three numeric review-score fields above, plus the status computation in §4.2 — there is no longer a single vetting-status string baked into the exported JSON at all.
 
-### 4.2 • How review status is determined
+### 4.2 • How the review badge is determined
 
-**The exported JSON never contains a computed status label.** It only contains the three raw `risk_severity` / `evidence_completeness` / `evidence_reliability` scores shown above. Any consumer that wants to show a badge — the model database UI, the [Workflow Review](./workflow-review) page — computes it itself from those three numbers:
+**The exported JSON never contains a computed badge.** It only contains the three raw `risk_severity` / `evidence_completeness` / `evidence_reliability` scores shown above. Every consumer that wants to show a badge — the Model Database, this wizard's own model picker, the Image Inspector, the [Workflow Review](./workflow-review) page, and the Rhino plugin's own icon (a separate, non-shared implementation of the same formula) — computes it from those three numbers using one shared function, `computeRequirementBadge()`.
 
-1. If any of the three is `-1` (not yet assigned), the status is **Not Yet Reviewed**, full stop, regardless of the other two.
-2. Otherwise, `risk_severity` (0 = safest, 4 = most severe) buckets to low (≤1) / moderate (2) / high (≥3).
-3. `evidence_confidence = min(evidence_completeness, evidence_reliability)` — the weaker of the two, since an assessment is only as trustworthy as its shakiest dimension. Buckets to weak (≤1) / moderate (2) / strong (≥3).
-4. Look up in this table:
+The result is a single integer, **`-1` through `3`**, not a named status string:
 
-|  | weak evidence | moderate evidence | strong evidence |
-| --- | --- | --- | --- |
-| **low risk** | Likely Safe | Likely Safe | **Vetted** |
-| **moderate risk** | Needs Review | Needs Review | Likely Safe |
-| **high risk** | Needs Review | **Potentially Problematic** | Potentially Problematic |
+```
+certainty = min(evidence_completeness, evidence_reliability)
 
-A high-risk call backed only by weak evidence lands on "Needs Review" rather than "Potentially Problematic" — the severity claim itself isn't trustworthy enough yet to present as a confirmed concern, but too serious a claim to present as safe either.
+risk_severity == -1 or certainty == -1   →  -1
+certainty <= 1                            →   0
+risk_severity >= 3                        →   1
+risk_severity <= 1                        →   3
+else (risk_severity == 2)                 →   2
+```
 
-**Known rough edge, worth calling out explicitly:** every model card in the database today still carries the *old* 3-value string scores (`"low"`, `"conditional"`, etc.) rather than real `0`–`4` integers, so right now every model resolves to `-1` / "Not Yet Reviewed" regardless of what its old string values said. This isn't a bug — it's the expected state until the cards are re-authored with real numeric scores. `size_bytes` has a similar rough edge: the card template has no field for it yet, so it's hardcoded in the backend for the handful of repos that had it under the old Supabase schema, and will read from the card itself once the template grows the field.
+`certainty` — the *weaker* of completeness and reliability, not an average — gates whether `risk_severity` is even trustworthy enough to report at all: a severe-sounding risk score backed by weak evidence resolves to `0` ("insufficient information"), not to whatever the raw severity number alone would suggest. This is the same instinct as the wizard's earlier five-level status formula, just re-numbered — a serious-sounding finding still can't outrun how well-supported it is.
+
+Each integer has two different label sets depending on where it's shown — an icon-only tooltip variant (used by the Rhino plugin's own badge and this app's title-row badges, where there's no room for a full pill) and a visible text-tag variant (used anywhere a model or requirement gets its own card or row):
+
+| Value | Icon tooltip | Visible tag |
+| --- | --- | --- |
+| `-1` | "We haven't checked yet" | Review Pending |
+| `0` | "We looked, but can't tell" | Insufficient information |
+| `1` | "We have significant concerns" | Not recommended |
+| `2` | "We have some concerns" | Potentially problematic |
+| `3` | "Looks good, have fun!" | Healthy |
+
+Note the ordering isn't monotonic risk-to-safety in the way you might expect from the numbers alone — `1` ("Not recommended") is a stronger warning than `2` ("Potentially problematic"), because `1` means `risk_severity` itself scored high, while `2` is the middle ground where severity is moderate. Go by the label, not by assuming higher-number-is-worse or better-is-higher.
+
+A [Workflow Review](./workflow-review#4--the-workflow-badge) badge is a further aggregation on top of this same formula, not a separate system — see that page for how multiple requirements collapse into one workflow-level number.
+
+**Known rough edge, worth calling out explicitly:** every model card in the database today still carries the *old*, pre-badge 3-value string scores (`"low"`, `"conditional"`, etc.) rather than real `0`–`4` integers, so right now every model resolves to `-1` regardless of what its old string values said. This isn't a bug — it's the expected state until the cards are re-authored with real numeric scores.
+
+### 4.3 • Caching
+
+Every Hugging Face fetch the wizard's model lookups ultimately depend on (§3.2) is cached for 24 hours server-side (Next.js's built-in fetch cache, not a hand-rolled one) — first request after a cold cache pays the real Hugging Face round-trip, every request after that for the next 24h is served from cache. This is shared across everyone hitting the deployment, not per-user, and it's why a model lookup in this wizard is typically fast even though it's a live fetch under the hood. The tradeoff is up to 24h of staleness after someone edits a card on Hugging Face directly — expected, not a bug, and there's no manual bypass today.
 
 ---
 

@@ -25,51 +25,46 @@ Both are query parameters rather than a path segment — a `record_id` elsewhere
 
   **How the plugin actually produces a fetchable link for the currently-loaded workflow is not wired up yet.** That mechanism doesn't exist — this is a real, open gap, not a detail left out of these docs. The document shape and the page that consumes it are both real and shipped; the delivery mechanism from the plugin isn't.
 
-- **`riskTolerance`** — passed through from whatever risk-tolerance setting exists in the plugin. The page accepts it and displays it, but nothing about the page's display logic reacts to it yet — no thresholds, no filtering. Treat it as a placeholder for future behavior, not a working feature.
+- **`riskTolerance`** — one of `high`, `low`, or `dev`, passed through from a setting in the Rhino plugin. Unlike an earlier revision of this page, it's genuinely used now — it selects how requirement scores get aggregated into the workflow-level badge (§4). Anything other than exactly `high` or `dev` — including the param being missing entirely — falls back to `low`, the most conservative aggregation. That's a deliberate choice: there's no spec for what an absent value should mean, so the page errs toward surfacing concerns rather than hiding them by default.
 
 ---
 
 ## 2 • Live re-resolution, not a snapshot
 
-For every requirement that carries a `record_id`, the page re-fetches that model's card live (the same lookup described in the [Workflow Wizard](./workflow-wizard) §3.2) rather than trusting the `provenance` object embedded in the document. A model's review status can change after a workflow was packaged and downloaded, and the point of showing a badge here is to reflect its status *now*, not a stale snapshot from whenever the workflow was exported.
+For every requirement that carries a `record_id`, the page re-fetches that model's card live (the same lookup described in the [Workflow Wizard](./workflow-wizard) §3.2) rather than trusting the `provenance` object embedded in the document. A model's review scores can change after a workflow was packaged and downloaded, and the point of showing a badge here is to reflect its status *now*, not a stale snapshot from whenever the workflow was exported.
 
-A requirement whose `record_id` was given but doesn't resolve (broken pointer, deleted card) is shown with an explanation rather than a badge; a requirement that never had a `record_id` at all (added manually in the wizard, or the built-in `pseudocomfy` extension entry) is labeled "Manually added, not reviewed" rather than given a colored status badge — that's a deliberate distinction between "unreviewed because nobody's gotten to it" and "not the kind of thing that gets reviewed."
+A requirement whose `record_id` was given but doesn't resolve (broken pointer, deleted card) shows an explanatory message instead of provenance rows. A requirement that never had a `record_id` at all — added manually in the wizard, or the built-in `pseudocomfy` extension entry — is treated as its own kind of unscored requirement: its badge is computed from whatever it embedded (which, for a manual entry, is all `-1`s), so it displays the same "Review Pending" tag as a real model nobody has gotten to yet. This page doesn't currently distinguish "never meant to be reviewed" from "reviewed nothing so far" in its badge — both read identically.
 
-One accuracy note worth knowing if you're building against this: the [Workflow Wizard](./workflow-wizard) always writes a `record_id` key (possibly `null`) for anything that came from a vetted-loader node, even if the database match failed — only Possible-Models/manual entries omit the key entirely (§4.1). This page's own resolution logic treats "falsy `record_id`" (`null` or absent) as the same case, so a vetted-loader match that simply failed to resolve currently displays identically to a genuinely manual entry — "Manually added, not reviewed" — rather than as a broken pointer. Not necessarily wrong, just worth knowing if the distinction ever matters to you.
+One accuracy note worth knowing if you're building against this: the [Workflow Wizard](./workflow-wizard) always writes a `record_id` key (possibly `null`) for anything that came from a vetted-loader node, even if the database match failed — only Possible-Models/manual entries omit the key entirely (§4.1 there). This page's own resolution logic treats a `record_id` that's `null` the same as one that's absent, so a vetted-loader match that simply failed to resolve renders identically to a genuinely manual entry too.
 
 ---
 
 ## 3 • What the page shows, top to bottom
 
-1. **Workflow identity** — thumbnail (if set), the workflow name as the page title (falling back to "Untitled workflow"), its description, and — shown only when present — the author (linked to `author_url` when given) and license.
+1. **Workflow identity** — the workflow name as the page title, with a small icon-only badge (§4) and a small thumbnail (if set) inline next to it; the description below; and, shown only when present, the author (linked to `author_url` when given) and license.
 
-2. **Status banner** — two elements, plus a sentence:
-   - An amber **"N not in database"** count badge, shown only when that count is greater than zero — covers requirements with no `record_id` at all, plus any `record_id` that failed to resolve.
-   - The workflow-level status badge (§4) next to it.
-   - Below both, a full sentence spelling out the breakdown rather than leaving the badge to speak for coverage on its own — e.g. *"5 of 6 requirements have a review record — 4 assessed, 1 pending review — 1 not in the database."* If nothing has completed review yet, this collapses to a plain *"No models in this workflow have completed review yet."*
-   - If `riskTolerance` was passed, a muted line underneath notes it's accepted but not yet used (§1).
+2. **Guidance Capabilities** — three groups (Global / Regional / Spatial), all eight possible flags shown always by human label (Scene Text, Style Text, Negative Text, Style Image / Regional Text, Regional Image / Spatial Depth, Spatial Edge). The ones this workflow actually uses are shown in black; the rest are shown muted — every flag is listed either way, not just the ones set `true`.
 
-3. **Guidance Capabilities** — all eight possible flags, grouped Global / Regional / Spatial, shown always by human label (Scene Text, Style Text, Negative Text, Style Image / Regional Text, Regional Image / Spatial Depth, Spatial Edge). The ones this workflow actually uses are shown filled and bold; the rest are shown hollow and muted — every flag is visible either way, not just the ones set `true`.
+3. **Variables** — count in the heading; one card per entry in `variables[]` — name, type, description, and default/min/max/step. "This workflow has no adjustable variables." when the array is empty.
 
-4. **Variables** — every entry in `variables[]`: name, type, `binds_to`, description, default, and min/max/step for numeric ones. "This workflow has no adjustable variables." when the array is empty.
+4. **Requirements** — count in the heading; one card per `endpoint_requirements[]` entry, each showing `display_name`/`requirement`, category, a visible badge tag (§4) unless it's the `pseudocomfy` extension entry (which never gets a badge), and whatever provenance fields it has — attribution, a "Source" link (`attribution_url`), license, download link, size, and, for a resolved record, reviewer, reviewed-at, license findings, evidence, and rationale.
 
-5. **Requirements** — one card per `endpoint_requirements[]` entry (same `ModelProvenanceCard` component the [Image Inspector](./workflow-wizard#6--image-drop--provenance-inspector) uses), each showing `display_name`, `category`, and whatever provenance fields it has — attribution, license, download link, size, and, for a resolved database record, reviewer, reviewed-at, license findings, evidence, and rationale — plus that individual requirement's own status badge or "not reviewed" label per §2.
+This page's requirement cards are a separate, page-local implementation — not the same `ModelProvenanceCard` component the [Image Inspector](./workflow-wizard#6--image-drop--provenance-inspector) uses, even though both render similar-looking provenance rows. They were deliberately kept independent during this page's redesign rather than reconciled into one shared component, so a change to one doesn't necessarily apply to the other.
 
 ---
 
-## 4 • Workflow-level status
+## 4 • The workflow badge
 
-This is a separate computation from the per-model status in the [Workflow Wizard](./workflow-wizard) §4.2, built on top of it.
+The page shows one badge for the whole workflow, next to its name — an icon-only glyph in a colored circle with a native hover tooltip, the same visual language the Rhino plugin's own icon uses (see the [Workflow Wizard](./workflow-wizard) §4.2 for the full `-1`–`3` scale and its two label sets). It's computed by `computeWorkflowBadge()`, which is a genuinely different calculation from a single requirement's badge, not just the same formula reused:
 
-Every requirement, based on its **live-resolved** record (not the document's embedded copy), sorts into exactly one of three buckets:
+1. Every non-extension requirement's `risk_severity`/`evidence_completeness`/`evidence_reliability` (live-resolved where possible, per §2) is collected into one list. The `pseudocomfy` extension entry is excluded — it never has a reviewable score, so including it would pollute the aggregate with an automatic `-1`/`-1`/`-1`.
+2. Those per-requirement triples collapse into a single triple, using an aggregation rule chosen by `riskTolerance`:
+   - **`high`** — average each dimension independently across all requirements.
+   - **`low`** — worst case: the maximum `risk_severity`, and the minimum of `evidence_completeness` and `evidence_reliability`, across all requirements.
+   - **`dev`** — no badge is computed at all; the title shows nothing, and (per the plugin's own contract) the workflow is expected to run regardless of score in this mode.
+3. That single collapsed triple is run through the same `computeRequirementBadge()` formula described in the [Workflow Wizard](./workflow-wizard) §4.2 to produce the final `-1`–`3` value.
 
-- **assessed** — has a live database record, and that record's status is not "Not Yet Reviewed."
-- **pending review** — has a live database record, but its status *is* "Not Yet Reviewed."
-- **not in database** — no live record at all (this bucket doesn't distinguish "never had a `record_id`" from "had one, but it didn't resolve" — the per-card display in point 5 above does, but the rollup itself only asks "is there a record to grade at all").
+**A real, known asymmetry between the two tolerance modes, worth understanding rather than treating as a bug you've found:** under `low`, a single unscored requirement (any `-1`) forces the collapsed `evidence_completeness`/`evidence_reliability` to `-1` via the `min()`, which sinks the *entire workflow's* badge to `-1` regardless of how good every other requirement's scores are — one review gap is enough to make the whole workflow read as unassessed. Under `high`, an unscored requirement's `-1` is folded into a plain average alongside everyone else's real scores, which can pull the workflow's effective severity or evidence numbers in a misleading direction without necessarily sinking the result to `-1` outright. This isn't hidden or accidental — it's flagged directly in the source as worth reconciling, not yet resolved. If you're relying on the `high` aggregation for anything decision-critical, know that a mix of scored and unscored requirements can currently average out to a number that doesn't obviously represent either "reviewed and fine" or "not reviewed."
 
-**Only the assessed bucket ever influences the workflow's overall badge — worst case wins**, in this order: Potentially Problematic > Needs Review > Likely Safe > Vetted. Pending and not-in-database requirements never pull the badge in either direction. If there are zero assessed requirements, the workflow status is "Not Yet Reviewed," and the page says outright that nothing has completed review — never something that could be misread as a safety claim about a workflow nobody has actually reviewed.
-
-This is deliberate: a workflow badge implying a verdict about a model nobody has actually reviewed would be a false claim, so review coverage is always shown as plainly as the verdict itself.
-
-**Same known rough edge as the Workflow Wizard docs, §4.2:** because every live model card today still carries old-format string review scores rather than real `0`–`4` integers, every requirement currently resolves to "Not Yet Reviewed," so every workflow's assessed count is currently zero and every workflow shows "Not Yet Reviewed" here too. Expected, not a bug, until the cards carry real scores.
+**Same known rough edge as the Workflow Wizard docs:** because every live model card today still carries old-format string review scores rather than real `0`–`4` integers, every requirement currently resolves to `-1`, so every workflow's badge is currently `-1` ("We haven't checked yet") under any tolerance except `dev`. Expected, not a bug, until the cards carry real scores.
 
